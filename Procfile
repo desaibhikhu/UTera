@@ -1,1 +1,1 @@
-web: python terabox.py
+web: python bot.py
