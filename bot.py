@@ -9,7 +9,7 @@ from os import environ
 import os
 import time
 import requests
-import aria2p
+import httpx
 from status import format_progress_bar
 
 # Load environment variables
@@ -50,21 +50,6 @@ else:
 
 # Initialize the bot
 app = Client("my_bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
-
-# Aria2 configuration
-aria2 = aria2p.API(
-    aria2p.Client(
-        host="http://localhost",
-        port=6800,
-        secret=""
-    )
-)
-options = {
-    "max-tries": "50",
-    "retry-wait": "3",
-    "continue": "true"
-}
-aria2.set_global_options(options)
 
 # Helper function to check user membership
 async def is_user_member(client, user_id):
@@ -129,44 +114,46 @@ async def download_video(url, reply_msg, user_mention, user_id):
     video_title = data["response"][0]["title"]
 
     try:
-        download = aria2.add_uris([fast_download_link])
-        start_time = datetime.now()
+        async with httpx.AsyncClient() as client:
+            download_response = await client.get(fast_download_link, follow_redirects=True)
+            download_response.raise_for_status()
+            total_size = int(download_response.headers.get("Content-Length", 0))
+            downloaded_size = 0
+            start_time = datetime.now()
 
-        while not download.is_complete:
-            download.update()
-            percentage = download.progress
-            done = download.completed_length
-            total_size = download.total_length
-            speed = download.download_speed
-            eta = download.eta
-            elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
-            progress_text = format_progress_bar(
-                filename=video_title,
-                percentage=percentage,
-                done=done,
-                total_size=total_size,
-                status="Downloading",
-                eta=eta,
-                speed=speed,
-                elapsed=elapsed_time_seconds,
-                user_mention=user_mention,
-                user_id=user_id,
-                aria2p_gid=download.gid
-            )
-            await reply_msg.edit_text(progress_text)
-            await asyncio.sleep(2)
+            file_path = f"{video_title}.mp4"
+            with open(file_path, "wb") as file:
+                async for chunk in download_response.aiter_bytes(chunk_size=1024):
+                    file.write(chunk)
+                    downloaded_size += len(chunk)
+                    percentage = (downloaded_size / total_size) * 100
+                    elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
+                    speed = downloaded_size / elapsed_time_seconds
+                    eta = (total_size - downloaded_size) / speed if speed > 0 else 0
+                    progress_text = format_progress_bar(
+                        filename=video_title,
+                        percentage=percentage,
+                        done=downloaded_size,
+                        total_size=total_size,
+                        status="Downloading",
+                        eta=eta,
+                        speed=speed,
+                        elapsed=elapsed_time_seconds,
+                        user_mention=user_mention,
+                        user_id=user_id,
+                        aria2p_gid=None
+                    )
+                    await reply_msg.edit_text(progress_text)
+                    await asyncio.sleep(2)
 
-        if download.is_complete:
-            file_path = download.files[0].path
+        thumbnail_path = "thumbnail.jpg"
+        thumbnail_response = requests.get(thumbnail_url)
+        with open(thumbnail_path, "wb") as thumb_file:
+            thumb_file.write(thumbnail_response.content)
 
-            thumbnail_path = "thumbnail.jpg"
-            thumbnail_response = requests.get(thumbnail_url)
-            with open(thumbnail_path, "wb") as thumb_file:
-                thumb_file.write(thumbnail_response.content)
+        await reply_msg.edit_text("ᴜᴘʟᴏᴀᴅɪɴɢ...")
 
-            await reply_msg.edit_text("ᴜᴘʟᴏᴀᴅɪɴɢ...")
-
-            return file_path, thumbnail_path, video_title
+        return file_path, thumbnail_path, video_title
     except Exception as e:
         logging.error(f"Error handling message: {e}")
         buttons = [
@@ -244,7 +231,7 @@ async def start_command(client, message):
     await asyncio.sleep(2)
     await sticker_message.delete()
     user_mention = message.from_user.mention
-    reply_message = f"ᴡᴇʟᴄᴏᴍᴇ, {user_mention}.\n\n🌟 ɪ ᴀᴍ ᴀ ᴛᴇʀᴀʙᴏx ᴅᴏᴡɴʟᴏᴀᴅᴇʀ ʙᴏᴛ. sᴇɴᴅ ᴍᴇ ᴀɴʏ ᴛᴇʀᴀʙᴏx ʟɪɴᴋ ɪ ᴡɪʟʟ ʜᴇʟᴘ ʏᴏᴜ ᴅᴏᴡɴʟᴏᴀᴅ ɪᴛ."
+    reply_message = f"ᴡᴇʟᴄᴏᴍᴇ, {user_mention}.\n\n🌟 ɪ ᴀᴍ ᴀ ᴛᴇʀᴀʙᴏx ᴅᴏᴡɴʟᴏᴀᴅᴇʀ ʙᴏᴛ. sᴇɴᴅ ᴍᴇ ᴀɴʏ ᴛᴇʀᴀʙᴏx ʟɪɴᴋ ɪ ᴡɪ�[...]
     join_button = InlineKeyboardButton("ᴊᴏɪɴ ❤️🚀", url="https://t.me/jetmirror")
     developer_button = InlineKeyboardButton("ᴅᴇᴠᴇʟᴏᴘᴇʀ ⚡️", url="https://t.me/hrishikesh2861")
     reply_markup = InlineKeyboardMarkup([[join_button, developer_button]])
