@@ -3,7 +3,7 @@ uvloop
 requests
 aiohttp
 aiofiles
-aria2p
+httpx
 git+https://github.com/Hrishi2861/pyrofork-2.2.11-peer-fix.git
 python-dotenv
 gunicorn
