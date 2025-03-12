@@ -7,6 +7,25 @@ import os, time
 import logging
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+    
+import os
+import aiohttp
+import aiofiles
+import aria2p
+import random
+import asyncio
+import logging
+import requests
+import time
+from datetime import datetime
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+# Terabox API Details
+TERABOX_API_URL = "https://terabox.web.id"
+TERABOX_API_TOKEN = "Brenner02"
+THUMBNAIL = "https://envs.sh/S-T.jpg"
+
+# Aria2 Configuration
 aria2 = aria2p.API(
     aria2p.Client(
         host="http://localhost",
@@ -14,74 +33,100 @@ aria2 = aria2p.API(
         secret=""
     )
 )
-options = {
+
+aria2.set_global_options({
     "max-tries": "50",
     "retry-wait": "3",
     "continue": "true"
-}
+})
 
-aria2.set_global_options(options)
+async def fetch_json(url: str) -> dict:
+    """Fetch JSON data from a URL."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            return await resp.json()
 
+async def aria2_download(url: str, user_id: int, filename: str, reply_msg, user_mention) -> str:
+    """Download using aria2 with parallel connections."""
+    sanitized_filename = filename.replace("/", "_").replace("\\", "_")
+    file_path = os.path.join(os.getcwd(), sanitized_filename)
+
+    download = aria2.add_uris([url], options={"out": sanitized_filename})
+    start_time = datetime.now()
+    last_update_time = time.time()
+
+    while not download.is_complete:
+        download.update()
+        percentage = download.progress
+        done = download.completed_length
+        total_size = download.total_length
+        speed = download.download_speed
+        eta = download.eta
+        elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
+
+        if time.time() - last_update_time > 2:
+            progress_text = (
+                f"📥 Downloading: {filename}\n"
+                f"🔹 Progress: {percentage:.2f}%\n"
+                f"⚡ Speed: {speed / 1024 / 1024:.2f} MB/s\n"
+                f"⏳ ETA: {eta}s\n"
+            )
+            try:
+                await reply_msg.edit_text(progress_text)
+                last_update_time = time.time()
+            except Exception as e:
+                logging.warning(f"Error updating progress message: {e}")
+
+        await asyncio.sleep(2)
+
+    if download.has_failed:
+        raise Exception("Aria2 download failed!")
+
+    return download.files[0].path
 
 async def download_video(url, reply_msg, user_mention, user_id):
-    response = requests.get(f"https://delta.terabox.web.id/url?url={url}&token=Brenner02")
-    response.raise_for_status()
-    data = response.json()
-
-    resolutions = data["response"][0]["resolutions"]
-    fast_download_link = resolutions["Fast Download"]
-    hd_download_link = resolutions["HD Video"]
-    thumbnail_url = data["response"][0]["thumbnail"]
-    video_title = data["response"][0]["title"]
-
+    """Fetch video details and download using Aria2."""
     try:
-        download = aria2.add_uris([fast_download_link])
-        start_time = datetime.now()
+        logging.info(f"Fetching video info: {url}")
+        
+        response = requests.get(f"https://delta.terabox.web.id/url?url={url}&token={TERABOX_API_TOKEN}")
+        response.raise_for_status()
+        data = response.json()
 
-        while not download.is_complete:
-            download.update()
-            percentage = download.progress
-            done = download.completed_length
-            total_size = download.total_length
-            speed = download.download_speed
-            eta = download.eta
-            elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
-            progress_text = format_progress_bar(
-                filename=video_title,
-                percentage=percentage,
-                done=done,
-                total_size=total_size,
-                status="Downloading",
-                eta=eta,
-                speed=speed,
-                elapsed=elapsed_time_seconds,
-                user_mention=user_mention,
-                user_id=user_id,
-                aria2p_gid=download.gid
-            )
-            await reply_msg.edit_text(progress_text)
-            await asyncio.sleep(2)
+        # Extract details
+        resolutions = data["response"][0]["resolutions"]
+        fast_download_link = resolutions["Fast Download"]
+        hd_download_link = resolutions["HD Video"]
+        thumbnail_url = data["response"][0]["thumbnail"]
+        video_title = data["response"][0]["title"]
 
-        if download.is_complete:
-            file_path = download.files[0].path
+        logging.info(f"Downloading: {video_title}")
 
-            thumbnail_path = "thumbnail.jpg"
-            thumbnail_response = requests.get(thumbnail_url)
-            with open(thumbnail_path, "wb") as thumb_file:
-                thumb_file.write(thumbnail_response.content)
+        try:
+            file_path = await asyncio.create_task(aria2_download(fast_download_link, user_id, video_title, reply_msg, user_mention))
+        except Exception as e:
+            logging.warning(f"Fast Download failed, retrying with HD Video. Error: {e}")
+            file_path = await asyncio.create_task(aria2_download(hd_download_link, user_id, video_title, reply_msg, user_mention))
 
-            await reply_msg.edit_text("ᴜᴘʟᴏᴀᴅɪɴɢ...")
+        # Download thumbnail
+        thumbnail_path = "thumbnail.jpg"
+        thumb_response = requests.get(thumbnail_url)
+        with open(thumbnail_path, "wb") as thumb_file:
+            thumb_file.write(thumb_response.content)
 
-            return file_path, thumbnail_path, video_title
+        await reply_msg.edit_text("✅ Download Complete! Uploading...")
+
+        return file_path, thumbnail_path, video_title
+
     except Exception as e:
-        logging.error(f"Error handling message: {e}")
+        logging.error(f"Download error: {e}")
         buttons = [
             [InlineKeyboardButton("🚀 HD Video", url=hd_download_link)],
             [InlineKeyboardButton("⚡ Fast Download", url=fast_download_link)]
         ]
         reply_markup = InlineKeyboardMarkup(buttons)
         await reply_msg.reply_text(
-            "Fast Download Link For this Video is Broken, Download manually using the Link Below.",
+            "Fast Download Link is broken. Please use the manual download links below.",
             reply_markup=reply_markup
         )
         return None, None, None
