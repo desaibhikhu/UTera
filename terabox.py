@@ -89,11 +89,11 @@ async def handle_message(client, message: Message):
     user_mention = message.from_user.mention
     is_member = await is_user_member(client, user_id)
 
-    if not is_member:
-        join_button = InlineKeyboardButton("ᴊᴏɪɴ ❤️🚀", url="https://t.me/FILE_SHARINGBOTS")
-        reply_markup = InlineKeyboardMarkup([[join_button]])
-        await message.reply_text("ʏᴏᴜ ᴍᴜsᴛ ᴊᴏɪɴ ᴍʏ ᴄʜᴀɴɴᴇʟ ᴛᴏ ᴜsᴇ ᴍᴇ.", reply_markup=reply_markup)
-        return
+    #if not is_member:
+        #join_button = InlineKeyboardButton("ᴊᴏɪɴ ❤️🚀", url="https://t.me/FILE_SHARINGBOTS")
+        #reply_markup = InlineKeyboardMarkup([[join_button]])
+        #await message.reply_text("ʏᴏᴜ ᴍᴜsᴛ ᴊᴏɪɴ ᴍʏ ᴄʜᴀɴɴᴇʟ ᴛᴏ ᴜsᴇ ᴍᴇ.", reply_markup=reply_markup)
+        #return
 
     valid_domains = [
     'terabox.com', 'nephobox.com', '4funbox.com', 'mirrobox.com', 
