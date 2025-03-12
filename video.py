@@ -7,7 +7,7 @@ import os, time
 import logging
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-    
+
 import os
 import aiohttp
 import aiofiles
@@ -88,25 +88,44 @@ async def download_video(url, reply_msg, user_mention, user_id):
     """Fetch video details and download using Aria2."""
     try:
         logging.info(f"Fetching video info: {url}")
-        
+
         response = requests.get(f"https://delta.terabox.web.id/url?url={url}&token={TERABOX_API_TOKEN}")
         response.raise_for_status()
         data = response.json()
 
-        # Extract details
-        resolutions = data["response"][0]["resolutions"]
-        fast_download_link = resolutions["Fast Download"]
-        hd_download_link = resolutions["HD Video"]
-        thumbnail_url = data["response"][0]["thumbnail"]
-        video_title = data["response"][0]["title"]
+        # Validate API response structure
+        if not isinstance(data, dict) or "response" not in data or not isinstance(data["response"], list):
+            raise ValueError("Invalid API response: missing 'response' field.")
+
+        video_data = data["response"][0]
+
+        # Validate necessary fields
+        if "resolutions" not in video_data or "title" not in video_data or "thumbnail" not in video_data:
+            raise ValueError("Invalid API response: missing required video details.")
+
+        resolutions = video_data["resolutions"]
+        fast_download_link = resolutions.get("Fast Download")
+        hd_download_link = resolutions.get("HD Video")
+        thumbnail_url = video_data["thumbnail"]
+        video_title = video_data["title"]
 
         logging.info(f"Downloading: {video_title}")
 
+        # Ensure at least one valid download link exists
+        if not fast_download_link and not hd_download_link:
+            raise ValueError("No valid download links found in API response.")
+
         try:
-            file_path = await asyncio.create_task(aria2_download(fast_download_link, user_id, video_title, reply_msg, user_mention))
+            if fast_download_link:
+                file_path = await asyncio.create_task(aria2_download(fast_download_link, user_id, video_title, reply_msg, user_mention))
+            else:
+                file_path = await asyncio.create_task(aria2_download(hd_download_link, user_id, video_title, reply_msg, user_mention))
         except Exception as e:
             logging.warning(f"Fast Download failed, retrying with HD Video. Error: {e}")
-            file_path = await asyncio.create_task(aria2_download(hd_download_link, user_id, video_title, reply_msg, user_mention))
+            if hd_download_link:
+                file_path = await asyncio.create_task(aria2_download(hd_download_link, user_id, video_title, reply_msg, user_mention))
+            else:
+                raise ValueError("Both Fast Download and HD Video links failed.")
 
         # Download thumbnail
         thumbnail_path = "thumbnail.jpg"
@@ -118,17 +137,27 @@ async def download_video(url, reply_msg, user_mention, user_id):
 
         return file_path, thumbnail_path, video_title
 
+    except ValueError as ve:
+        logging.error(f"Invalid API Response: {ve}")
+        await reply_msg.edit_text("⚠️ Unable to fetch video details. Please try again later.")
+        return None, None, None
+
     except Exception as e:
         logging.error(f"Download error: {e}")
-        buttons = [
-            [InlineKeyboardButton("🚀 HD Video", url=hd_download_link)],
-            [InlineKeyboardButton("⚡ Fast Download", url=fast_download_link)]
-        ]
-        reply_markup = InlineKeyboardMarkup(buttons)
-        await reply_msg.reply_text(
-            "Fast Download Link is broken. Please use the manual download links below.",
-            reply_markup=reply_markup
-        )
+
+        buttons = []
+        if "hd_download_link" in locals() and hd_download_link:
+            buttons.append([InlineKeyboardButton("🚀 HD Video", url=hd_download_link)])
+        if "fast_download_link" in locals() and fast_download_link:
+            buttons.append([InlineKeyboardButton("⚡ Fast Download", url=fast_download_link)])
+
+        if buttons:
+            reply_markup = InlineKeyboardMarkup(buttons)
+            await reply_msg.reply_text(
+                "Fast Download Link is broken. Please use the manual download links below.",
+                reply_markup=reply_markup
+            )
+
         return None, None, None
 
 # async def download_video(url, reply_msg, user_mention, user_id):
