@@ -2,7 +2,7 @@ import requests
 import aria2p
 from datetime import datetime
 from status import format_progress_bar
-import asyncio
+import aiohttp
 import os, time
 import logging
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
