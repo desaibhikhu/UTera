@@ -46,47 +46,49 @@ async def fetch_json(url: str) -> dict:
         async with session.get(url) as resp:
             return await resp.json()
 
-async def get_final_download_url(url, cookies):
-    """Follow HTTP 302 redirection and return the final download URL, using cookies."""
-    async with aiohttp.ClientSession(cookies=cookies) as session:
-        async with session.get(url, allow_redirects=False) as resp:
-            if resp.status == 302 and "Location" in resp.headers:
-                return resp.headers["Location"]
-            raise Exception("Failed to fetch the final download URL")
 
-async def aria2_download(url: str, user_id: int, filename: str, reply_msg, user_mention, cookies) -> str:
-    """Download using aria2 with parallel connections and show speed + ETA."""
+async def download(url: str, user_id: int, filename: str, reply_msg, user_mention, file_size: int) -> str:
     sanitized_filename = filename.replace("/", "_").replace("\\", "_")
     file_path = os.path.join(os.getcwd(), sanitized_filename)
 
-    # Convert cookies dict to "key=value" format for aria2
-    cookie_string = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+    options = {
+        "out": sanitized_filename,
+        "dir": os.getcwd(),
+        "max-connection-per-server": "16",
+        "split": "16",
+        "continue": "true",
+        "check-integrity": "true",
+    }
 
-    download = aria2.add_uris(
-        [url],
-        options={
-            "out": sanitized_filename,
-            "header": [f"Cookie: {cookie_string}"]
-        }
-    )
+    logging.info(f"Starting Aria2 download: {filename}")
+    download = aria2.add_uris([url], options=options)
 
     start_time = datetime.now()
     last_update_time = time.time()
 
     while not download.is_complete:
         download.update()
-        percentage = download.progress
-        done = download.completed_length
-        total_size = download.total_length
+        if download.error_message:
+            raise Exception(f"Download failed: {download.error_message}")
+
+        percentage = (download.completed_length / file_size) * 100 if file_size else 0
+        elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
         speed = download.download_speed
-        eta = download.eta  # Estimated time remaining (seconds)
+        eta = (file_size - download.completed_length) / speed if speed > 0 else 0
 
         if time.time() - last_update_time > 2:
-            progress_text = (
-                f"📥 Downloading: `{filename}`\n"
-                f"🔹 Progress: `{percentage:.2f}%`\n"
-                f"⚡ Speed: `{speed / 1024 / 1024:.2f} MB/s`\n"
-                f"⏳ ETA: `{eta}s`\n"
+            progress_text = format_progress_bar(
+                filename=filename,
+                percentage=percentage,
+                done=download.completed_length,
+                total_size=file_size,
+                status="Downloading",
+                eta=eta,
+                speed=speed,
+                elapsed=elapsed_time_seconds,
+                user_mention=user_mention,
+                user_id=user_id,
+                aria2p_gid=download.gid
             )
             try:
                 await reply_msg.edit_text(progress_text)
@@ -96,64 +98,51 @@ async def aria2_download(url: str, user_id: int, filename: str, reply_msg, user_
 
         await asyncio.sleep(2)
 
-    if download.has_failed:
-        raise Exception("Aria2 download failed!")
+    if download.is_complete:
+        return file_path
+    else:
+        raise Exception("Download failed or was interrupted.")
 
-    return download.files[0].path
-
-async def download_video(url, reply_msg, user_mention, user_id):
-    """Fetch video details and download using Aria2, handling redirects and cookies."""
+async def download_video(url, reply_msg, user_mention, user_id, max_retries=3):
     try:
         logging.info(f"Fetching video info: {url}")
+
+        # Fetch video details
         api_response = await fetch_json(f"{TERABOX_API_URL}/url?url={url}&token={TERABOX_API_TOKEN}")
 
-        # Print response for debugging
-        logging.info(f"API Response: {api_response}")
-
-        # Ensure API response is valid
         if not api_response or not isinstance(api_response, list) or "filename" not in api_response[0]:
-            raise ValueError(f"Invalid API response: {api_response}")
+            raise Exception("Invalid API response format.")
 
-        # Fetch cookies
-        cookies = await fetch_json(f"{TERABOX_API_URL}/gc?token={TERABOX_API_TOKEN}")
-
-        # Extract details from API response
+        # Extract details from response
         data = api_response[0]
-        terabox_redirect_url = data.get("link", "")
-
-        if not terabox_redirect_url:
-            raise ValueError("Missing download link in API response.")
-
-        # Get final download URL
-        final_download_url = await get_final_download_url(terabox_redirect_url, cookies)
+        download_link = data["link"] + f"&random={random.randint(1, 10)}"
         video_title = data["filename"]
+        file_size = int(data.get("size", 0))  # Convert to int to ensure proper type
         thumb_url = THUMBNAIL  # Use default if missing
 
-        logging.info(f"Final Download URL: {final_download_url}")
-        logging.info(f"Downloading: {video_title}")
+        logging.info(f"Downloading: {video_title} | Size: {file_size} bytes")
 
-        # Start Aria2 download
-        file_path = await asyncio.create_task(
-            aria2_download(final_download_url, user_id, video_title, reply_msg, user_mention, cookies)
-        )
+        if file_size == 0:
+            raise Exception("Failed to get file size, download aborted.")
 
-        if not file_path:
-            raise ValueError("Download failed: file path is None.")
+        # Retry logic for robustness
+        for attempt in range(1, max_retries + 1):
+            try:
+                file_path = await asyncio.create_task(download(download_link, user_id, video_title, reply_msg, user_mention, file_size))
+                break  # Exit loop if successful
+            except Exception as e:
+                logging.warning(f"Download failed (Attempt {attempt}/{max_retries}): {e}")
+                if attempt == max_retries:
+                    raise e  # Raise error if all retries fail
+                await asyncio.sleep(3)
 
-        # Download thumbnail
-        thumbnail_path = "thumbnail.jpg"
-        thumb_response = requests.get(thumb_url)
-        with open(thumbnail_path, "wb") as thumb_file:
-            thumb_file.write(thumb_response.content)
-
-        await reply_msg.edit_text("✅ Download Complete! Uploading...")
-
-        return file_path, thumbnail_path, video_title
+        # Send completion message
+        await reply_msg.edit_text(f"✅ Download Complete!\n📂 {video_title}")
+        return file_path, thumb_url, video_title, None  # No duration in response
 
     except Exception as e:
-        logging.error(f"Download error: {e}")
-        await reply_msg.edit_text(f"⚠️ Error: {e}")
-        return None, None, None
+        logging.error(f"Error: {e}", exc_info=True)
+        return None, None, None, None
 
 
 async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message):
@@ -167,7 +156,10 @@ async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg
         uploaded = current
         percentage = (current / total) * 100
         elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
-        
+
+        speed = current / elapsed_time_seconds if elapsed_time_seconds > 0 else 0
+        eta = (total - current) / speed if speed > 0 else 0
+
         if time.time() - last_update_time > 2:
             progress_text = format_progress_bar(
                 filename=video_title,
@@ -175,8 +167,8 @@ async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg
                 done=current,
                 total_size=total,
                 status="Uploading",
-                eta=(total - current) / (current / elapsed_time_seconds) if current > 0 else 0,
-                speed=current / elapsed_time_seconds if current > 0 else 0,
+                eta=eta,
+                speed=speed,
                 elapsed=elapsed_time_seconds,
                 user_mention=user_mention,
                 user_id=user_id,
@@ -188,26 +180,42 @@ async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg
             except Exception as e:
                 logging.warning(f"Error updating progress message: {e}")
 
-    with open(file_path, 'rb') as file:
+    try:
         collection_message = await client.send_video(
             chat_id=collection_channel_id,
-            video=file,
-            caption=f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ : {user_mention}\n📥 ᴜsᴇʀ ʟɪɴᴋ: tg://user?id={user_id}",
+            video=file_path,
+            caption=f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ: {user_mention}\n📥 ᴜsᴇʀ ʟɪɴᴋ: tg://user?id={user_id}",
             thumb=thumbnail_path,
             progress=progress
         )
+
         await client.copy_message(
             chat_id=message.chat.id,
             from_chat_id=collection_channel_id,
             message_id=collection_message.id
         )
+
         await asyncio.sleep(1)
         await message.delete()
 
-    await reply_msg.delete()
-    sticker_message = await message.reply_sticker("CAACAgIAAxkBAAEZdwRmJhCNfFRnXwR_lVKU1L9F3qzbtAAC4gUAAj-VzApzZV-v3phk4DQE")
-    os.remove(file_path)
-    os.remove(thumbnail_path)
-    await asyncio.sleep(5)
-    await sticker_message.delete()
+        await reply_msg.delete()
+        sticker_message = await message.reply_sticker("CAACAgIAAxkBAAEZdwRmJhCNfFRnXwR_lVKU1L9F3qzbtAAC4gUAAj-VzApzZV-v3phk4DQE")
+        await asyncio.sleep(5)
+        await sticker_message.delete()
+
+    except FloodWait as e:
+        logging.warning(f"FloodWait triggered: Sleeping for {e.value} seconds")
+        await asyncio.sleep(e.value)
+        return await upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message)  # Retry
+
+    except Exception as e:
+        logging.error(f"Upload failed: {e}", exc_info=True)
+        await reply_msg.edit_text(f"❌ Upload failed: {e}")
+
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if os.path.exists(thumbnail_path):
+            os.remove(thumbnail_path)
+
     return collection_message.id
