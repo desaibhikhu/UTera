@@ -51,6 +51,11 @@ async def aria2_download(url: str, user_id: int, filename: str, reply_msg, user_
     sanitized_filename = filename.replace("/", "_").replace("\\", "_")
     file_path = os.path.join(os.getcwd(), sanitized_filename)
 
+    cookies = await fetch_json(f"{TERABOX_API_URL}/gc?token={TERABOX_API_TOKEN}")
+
+    download_key = f"{user_id}-{sanitized_filename}"  # Unique key per file
+    downloads_manager[download_key] = {"downloaded": 0}
+
     download = aria2.add_uris([url], options={"out": sanitized_filename})
     start_time = datetime.now()
     last_update_time = time.time()
@@ -88,26 +93,17 @@ async def download_video(url, reply_msg, user_mention, user_id):
     """Fetch video details and download using Aria2."""
     try:
         logging.info(f"Fetching video info: {url}")
+        api_response = await fetch_json(f"{TERABOX_API_URL}/url?url={url}&token={TERABOX_API_TOKEN}")
 
-        response = requests.get(f"https://delta.terabox.web.id/url?url={url}&token={TERABOX_API_TOKEN}")
-        response.raise_for_status()
-        data = response.json()
+        if not api_response or not isinstance(api_response, list) or "filename" not in api_response[0]:
+            raise Exception("Invalid API response format.")
 
-        # Validate API response structure
-        if not isinstance(data, dict) or "response" not in data or not isinstance(data["response"], list):
-            raise ValueError("Invalid API response: missing 'response' field.")
-
-        video_data = data["response"][0]
-
-        # Validate necessary fields
-        if "resolutions" not in video_data or "title" not in video_data or "thumbnail" not in video_data:
-            raise ValueError("Invalid API response: missing required video details.")
-
-        resolutions = video_data["resolutions"]
-        fast_download_link = resolutions.get("Fast Download")
-        hd_download_link = resolutions.get("HD Video")
-        thumbnail_url = video_data["thumbnail"]
-        video_title = video_data["title"]
+        # Extract details from response
+        data = api_response[0]
+        download_link = data["link"] + f"&random={random.randint(1, 10)}"
+        video_title = data["filename"]
+        file_size = int(data.get("size", 0))  # Convert to int to ensure proper type
+        thumb_url = THUMBNAIL  # Use default if missing
 
         logging.info(f"Downloading: {video_title}")
 
@@ -159,58 +155,6 @@ async def download_video(url, reply_msg, user_mention, user_id):
             )
 
         return None, None, None
-
-# async def download_video(url, reply_msg, user_mention, user_id):
-#     response = requests.get(f"https://teraboxvideodownloader.nepcoderdevs.workers.dev/?url={url}")
-#     response.raise_for_status()
-#     data = response.json()
-
-#     resolutions = data["response"][0]["resolutions"]
-#     fast_download_link = resolutions["Fast Download"]
-#     hd_download_link = resolutions["HD Video"]
-#     thumbnail_url = data["response"][0]["thumbnail"]
-#     video_title = data["response"][0]["title"]
-
-#     download = aria2.add_uris([fast_download_link])
-#     start_time = datetime.now()
-
-#     while not download.is_complete:
-#         download.update()
-#         percentage = download.progress
-#         done = download.completed_length
-#         total_size = download.total_length
-#         speed = download.download_speed
-#         eta = download.eta
-#         elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
-#         progress_text = format_progress_bar(
-#             filename=video_title,
-#             percentage=percentage,
-#             done=done,
-#             total_size=total_size,
-#             status="Downloading",
-#             eta=eta,
-#             speed=speed,
-#             elapsed=elapsed_time_seconds,
-#             user_mention=user_mention,
-#             user_id=user_id,
-#             aria2p_gid=download.gid
-#         )
-#         await reply_msg.edit_text(progress_text)
-#         await asyncio.sleep(2)
-
-#     if download.is_complete:
-#         file_path = download.files[0].path
-
-#         thumbnail_path = "thumbnail.jpg"
-#         thumbnail_response = requests.get(thumbnail_url)
-#         with open(thumbnail_path, "wb") as thumb_file:
-#             thumb_file.write(thumbnail_response.content)
-
-#         await reply_msg.edit_text("ᴜᴘʟᴏᴀᴅɪɴɢ...")
-
-#         return file_path, thumbnail_path, video_title
-#     else:
-#         return markup
 
 
 async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message):
