@@ -46,17 +46,30 @@ async def fetch_json(url: str) -> dict:
         async with session.get(url) as resp:
             return await resp.json()
 
-async def aria2_download(url: str, user_id: int, filename: str, reply_msg, user_mention) -> str:
-    """Download using aria2 with parallel connections."""
+async def get_final_download_url(url, cookies):
+    """Follow HTTP 302 redirection and return the final download URL, using cookies."""
+    async with aiohttp.ClientSession(cookies=cookies) as session:
+        async with session.get(url, allow_redirects=False) as resp:
+            if resp.status == 302 and "Location" in resp.headers:
+                return resp.headers["Location"]
+            raise Exception("Failed to fetch the final download URL")
+
+async def aria2_download(url: str, user_id: int, filename: str, reply_msg, user_mention, cookies) -> str:
+    """Download using aria2 with parallel connections and show speed + ETA."""
     sanitized_filename = filename.replace("/", "_").replace("\\", "_")
     file_path = os.path.join(os.getcwd(), sanitized_filename)
 
-    cookies = await fetch_json(f"{TERABOX_API_URL}/gc?token={TERABOX_API_TOKEN}")
+    # Convert cookies dict to "key=value" format for aria2
+    cookie_string = "; ".join([f"{k}={v}" for k, v in cookies.items()])
 
-    download_key = f"{user_id}-{sanitized_filename}"  # Unique key per file
-    downloads_manager[download_key] = {"downloaded": 0}
+    download = aria2.add_uris(
+        [url],
+        options={
+            "out": sanitized_filename,
+            "header": [f"Cookie: {cookie_string}"]
+        }
+    )
 
-    download = aria2.add_uris([url], options={"out": sanitized_filename})
     start_time = datetime.now()
     last_update_time = time.time()
 
@@ -66,15 +79,14 @@ async def aria2_download(url: str, user_id: int, filename: str, reply_msg, user_
         done = download.completed_length
         total_size = download.total_length
         speed = download.download_speed
-        eta = download.eta
-        elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
+        eta = download.eta  # Estimated time remaining (seconds)
 
         if time.time() - last_update_time > 2:
             progress_text = (
-                f"📥 Downloading: {filename}\n"
-                f"🔹 Progress: {percentage:.2f}%\n"
-                f"⚡ Speed: {speed / 1024 / 1024:.2f} MB/s\n"
-                f"⏳ ETA: {eta}s\n"
+                f"📥 Downloading: `{filename}`\n"
+                f"🔹 Progress: `{percentage:.2f}%`\n"
+                f"⚡ Speed: `{speed / 1024 / 1024:.2f} MB/s`\n"
+                f"⏳ ETA: `{eta}s`\n"
             )
             try:
                 await reply_msg.edit_text(progress_text)
@@ -90,7 +102,7 @@ async def aria2_download(url: str, user_id: int, filename: str, reply_msg, user_
     return download.files[0].path
 
 async def download_video(url, reply_msg, user_mention, user_id):
-    """Fetch video details and download using Aria2."""
+    """Fetch video details and download using Aria2, handling redirects and cookies."""
     try:
         logging.info(f"Fetching video info: {url}")
         api_response = await fetch_json(f"{TERABOX_API_URL}/url?url={url}&token={TERABOX_API_TOKEN}")
@@ -98,34 +110,30 @@ async def download_video(url, reply_msg, user_mention, user_id):
         if not api_response or not isinstance(api_response, list) or "filename" not in api_response[0]:
             raise Exception("Invalid API response format.")
 
-        # Extract details from response
+        # Fetch cookies
+        cookies = await fetch_json(f"{TERABOX_API_URL}/gc?token={TERABOX_API_TOKEN}")
+
+        # Extract details from API response
         data = api_response[0]
-        download_link = data["link"] + f"&random={random.randint(1, 10)}"
+        terabox_redirect_url = data["link"]
+
+        # Get final download URL with cookies
+        final_download_url = await get_final_download_url(terabox_redirect_url, cookies)
+
         video_title = data["filename"]
-        file_size = int(data.get("size", 0))  # Convert to int to ensure proper type
         thumb_url = THUMBNAIL  # Use default if missing
 
+        logging.info(f"Final Download URL: {final_download_url}")
         logging.info(f"Downloading: {video_title}")
 
-        # Ensure at least one valid download link exists
-        if not fast_download_link and not hd_download_link:
-            raise ValueError("No valid download links found in API response.")
-
-        try:
-            if fast_download_link:
-                file_path = await asyncio.create_task(aria2_download(fast_download_link, user_id, video_title, reply_msg, user_mention))
-            else:
-                file_path = await asyncio.create_task(aria2_download(hd_download_link, user_id, video_title, reply_msg, user_mention))
-        except Exception as e:
-            logging.warning(f"Fast Download failed, retrying with HD Video. Error: {e}")
-            if hd_download_link:
-                file_path = await asyncio.create_task(aria2_download(hd_download_link, user_id, video_title, reply_msg, user_mention))
-            else:
-                raise ValueError("Both Fast Download and HD Video links failed.")
+        # Start download with Aria2, passing cookies
+        file_path = await asyncio.create_task(
+            aria2_download(final_download_url, user_id, video_title, reply_msg, user_mention, cookies)
+        )
 
         # Download thumbnail
         thumbnail_path = "thumbnail.jpg"
-        thumb_response = requests.get(thumbnail_url)
+        thumb_response = requests.get(thumb_url)
         with open(thumbnail_path, "wb") as thumb_file:
             thumb_file.write(thumb_response.content)
 
@@ -133,28 +141,12 @@ async def download_video(url, reply_msg, user_mention, user_id):
 
         return file_path, thumbnail_path, video_title
 
-    except ValueError as ve:
-        logging.error(f"Invalid API Response: {ve}")
+    except Exception as e:
+        logging.error(f"Download error: {e}")
         await reply_msg.edit_text("⚠️ Unable to fetch video details. Please try again later.")
         return None, None, None
 
-    except Exception as e:
-        logging.error(f"Download error: {e}")
 
-        buttons = []
-        if "hd_download_link" in locals() and hd_download_link:
-            buttons.append([InlineKeyboardButton("🚀 HD Video", url=hd_download_link)])
-        if "fast_download_link" in locals() and fast_download_link:
-            buttons.append([InlineKeyboardButton("⚡ Fast Download", url=fast_download_link)])
-
-        if buttons:
-            reply_markup = InlineKeyboardMarkup(buttons)
-            await reply_msg.reply_text(
-                "Fast Download Link is broken. Please use the manual download links below.",
-                reply_markup=reply_markup
-            )
-
-        return None, None, None
 
 
 async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message):
