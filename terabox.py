@@ -110,7 +110,7 @@ async def handle_message(client, message: Message):
     reply_msg = await message.reply_text("sᴇɴᴅɪɴɢ ʏᴏᴜ ᴛʜᴇ ᴍᴇᴅɪᴀ...🤤")
 
     try:
-        file_path, thumbnail_path, video_title, video_duration = await download_video(message_text, reply_msg, user_mention, user_id)
+        file_path, thumbnail_path, video_title, video_duration = await download_video(terabox_link, reply_msg, user_mention, user_id)
 
         if file_path is None:
             return await reply_msg.edit_text("Failed to download. The link may be broken.")
