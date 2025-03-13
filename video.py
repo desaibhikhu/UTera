@@ -107,29 +107,38 @@ async def download_video(url, reply_msg, user_mention, user_id):
         logging.info(f"Fetching video info: {url}")
         api_response = await fetch_json(f"{TERABOX_API_URL}/url?url={url}&token={TERABOX_API_TOKEN}")
 
+        # Print response for debugging
+        logging.info(f"API Response: {api_response}")
+
+        # Ensure API response is valid
         if not api_response or not isinstance(api_response, list) or "filename" not in api_response[0]:
-            raise Exception("Invalid API response format.")
+            raise ValueError(f"Invalid API response: {api_response}")
 
         # Fetch cookies
         cookies = await fetch_json(f"{TERABOX_API_URL}/gc?token={TERABOX_API_TOKEN}")
 
         # Extract details from API response
         data = api_response[0]
-        terabox_redirect_url = data["link"]
+        terabox_redirect_url = data.get("link", "")
 
-        # Get final download URL with cookies
+        if not terabox_redirect_url:
+            raise ValueError("Missing download link in API response.")
+
+        # Get final download URL
         final_download_url = await get_final_download_url(terabox_redirect_url, cookies)
-
         video_title = data["filename"]
         thumb_url = THUMBNAIL  # Use default if missing
 
         logging.info(f"Final Download URL: {final_download_url}")
         logging.info(f"Downloading: {video_title}")
 
-        # Start download with Aria2, passing cookies
+        # Start Aria2 download
         file_path = await asyncio.create_task(
             aria2_download(final_download_url, user_id, video_title, reply_msg, user_mention, cookies)
         )
+
+        if not file_path:
+            raise ValueError("Download failed: file path is None.")
 
         # Download thumbnail
         thumbnail_path = "thumbnail.jpg"
@@ -143,10 +152,8 @@ async def download_video(url, reply_msg, user_mention, user_id):
 
     except Exception as e:
         logging.error(f"Download error: {e}")
-        await reply_msg.edit_text("⚠️ Unable to fetch video details. Please try again later.")
+        await reply_msg.edit_text(f"⚠️ Error: {e}")
         return None, None, None
-
-
 
 
 async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message):
