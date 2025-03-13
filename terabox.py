@@ -110,11 +110,24 @@ async def handle_message(client, message: Message):
     reply_msg = await message.reply_text("sᴇɴᴅɪɴɢ ʏᴏᴜ ᴛʜᴇ ᴍᴇᴅɪᴀ...🤤")
 
     try:
-        file_path, thumbnail_path, video_title = await download_video(terabox_link, reply_msg, user_mention, user_id)
+        file_path, thumbnail_path, video_title, _ = await download_video(terabox_link, reply_msg, user_mention, user_id)
+        
+        if not file_path:
+            raise Exception("Download failed. No valid file path returned.")
+
         await upload_video(client, file_path, thumbnail_path, video_title, reply_msg, dump_id, user_mention, user_id, message)
+
     except Exception as e:
-        logging.error(f"Error handling message: {e}")
-        await reply_msg.edit_text("Api has given a Broken Download Link. Dont Contact the Owner for this Issue.")
+        logging.error(f"Error handling Terabox download: {e}", exc_info=True)
+        await reply_msg.edit_text("❌ API has provided a broken download link. Do not contact the owner for this issue.")
+
+    finally:
+        # Cleanup: Remove files if they exist
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            os.remove(thumbnail_path)
+    
 
 if __name__ == "__main__":
     keep_alive()
