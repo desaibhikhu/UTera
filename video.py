@@ -25,83 +25,90 @@ TERABOX_API_URL = "https://terabox.web.id"
 TERABOX_API_TOKEN = "Brenner02"
 THUMBNAIL = "https://envs.sh/S-T.jpg"
 
-# Aria2 Configuration
-aria2 = aria2p.API(
-    aria2p.Client(
-        host="http://localhost",
-        port=6800,
-        secret=""
-    )
-)
+downloads_manager = {}
 
-aria2.set_global_options({
-    "max-tries": "50",
-    "retry-wait": "3",
-    "continue": "true"
-})
+async def download_thumbnail(url: str) -> str:
+    """Downloads the thumbnail from a URL and saves it locally."""
+    filename = "thumbnail.jpg"
+    file_path = os.path.join(os.getcwd(), filename)
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise Exception(f"Failed to download thumbnail: HTTP {resp.status}")
+
+            async with aiofiles.open(file_path, 'wb') as f:
+                await f.write(await resp.read())
+
+    return file_path  # Return local file path
 
 async def fetch_json(url: str) -> dict:
-    """Fetch JSON data from a URL."""
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             return await resp.json()
-
 
 async def download(url: str, user_id: int, filename: str, reply_msg, user_mention, file_size: int) -> str:
     sanitized_filename = filename.replace("/", "_").replace("\\", "_")
     file_path = os.path.join(os.getcwd(), sanitized_filename)
 
-    options = {
-        "out": sanitized_filename,
-        "dir": os.getcwd(),
-        "max-connection-per-server": "16",
-        "split": "16",
-        "continue": "true",
-        "check-integrity": "true",
-    }
+    cookies = await fetch_json(f"{TERABOX_API_URL}/gc?token={TERABOX_API_TOKEN}")
 
-    logging.info(f"Starting Aria2 download: {filename}")
-    download = aria2.add_uris([url], options=options)
+    download_key = f"{user_id}-{sanitized_filename}"  # Unique key per file
+    downloads_manager[download_key] = {"downloaded": 0}
 
-    start_time = datetime.now()
-    last_update_time = time.time()
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=900),
+        cookies=cookies
+    ) as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise Exception(f"Failed to fetch video: HTTP {resp.status}")
 
-    while not download.is_complete:
-        download.update()
-        if download.error_message:
-            raise Exception(f"Download failed: {download.error_message}")
+            total_size = int(resp.headers.get("Content-Length", 0)) or file_size  # Ensure file size is correct
+            start_time = datetime.now()
+            last_update_time = time.time()
 
-        percentage = (download.completed_length / file_size) * 100 if file_size else 0
-        elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
-        speed = download.download_speed
-        eta = (file_size - download.completed_length) / speed if speed > 0 else 0
+            async def progress(current, total):
+                nonlocal last_update_time
+                percentage = (current / total) * 100 if total else 0
+                elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
+                speed = current / elapsed_time_seconds if elapsed_time_seconds > 0 else 0
+                eta = (total - current) / speed if speed > 0 else 0
 
-        if time.time() - last_update_time > 2:
-            progress_text = format_progress_bar(
-                filename=filename,
-                percentage=percentage,
-                done=download.completed_length,
-                total_size=file_size,
-                status="Downloading",
-                eta=eta,
-                speed=speed,
-                elapsed=elapsed_time_seconds,
-                user_mention=user_mention,
-                user_id=user_id,
-                aria2p_gid=download.gid
-            )
-            try:
-                await reply_msg.edit_text(progress_text)
-                last_update_time = time.time()
-            except Exception as e:
-                logging.warning(f"Error updating progress message: {e}")
+                if time.time() - last_update_time > 2:
+                    progress_text = format_progress_bar(
+                        filename=filename,
+                        percentage=percentage,
+                        done=current,
+                        total_size=total,
+                        status="Downloading",
+                        eta=eta,
+                        speed=speed,
+                        elapsed=elapsed_time_seconds,
+                        user_mention=user_mention,
+                        user_id=user_id,
+                        aria2p_gid=""
+                    )
+                    try:
+                        await reply_msg.edit_text(progress_text)
+                        last_update_time = time.time()
+                    except Exception as e:
+                        logging.warning(f"Error updating progress message: {e}")
 
-        await asyncio.sleep(2)
+            async with aiofiles.open(file_path, 'wb') as f:
+                while True:
+                    chunk = await resp.content.read(10 * 1024 * 1024)  # 10MB chunks
+                    if not chunk:
+                        break
+                    if downloads_manager[download_key]["downloaded"] + len(chunk) > total_size:
+                        logging.warning(f"Download exceeded expected size for {filename}. Stopping...")
+                        break
+                    await f.write(chunk)
+                    downloads_manager[download_key]['downloaded'] += len(chunk)
+                    await progress(downloads_manager[download_key]['downloaded'], total_size)
 
-    if download.is_complete:
-        return file_path
-    else:
-        raise Exception("Download failed or was interrupted.")
+    downloads_manager.pop(download_key, None)  # Cleanup after completion
+    return file_path
 
 async def download_video(url, reply_msg, user_mention, user_id, max_retries=3):
     try:
@@ -145,77 +152,93 @@ async def download_video(url, reply_msg, user_mention, user_id, max_retries=3):
         return None, None, None, None
 
 
-async def upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message):
-    file_size = os.path.getsize(file_path)
-    uploaded = 0
-    start_time = datetime.now()
-    last_update_time = time.time()
-
-    async def progress(current, total):
-        nonlocal uploaded, last_update_time
-        uploaded = current
-        percentage = (current / total) * 100
-        elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
-
-        speed = current / elapsed_time_seconds if elapsed_time_seconds > 0 else 0
-        eta = (total - current) / speed if speed > 0 else 0
-
-        if time.time() - last_update_time > 2:
-            progress_text = format_progress_bar(
-                filename=video_title,
-                percentage=percentage,
-                done=current,
-                total_size=total,
-                status="Uploading",
-                eta=eta,
-                speed=speed,
-                elapsed=elapsed_time_seconds,
-                user_mention=user_mention,
-                user_id=user_id,
-                aria2p_gid=""
-            )
-            try:
-                await reply_msg.edit_text(progress_text)
-                last_update_time = time.time()
-            except Exception as e:
-                logging.warning(f"Error updating progress message: {e}")
-
+async def upload_video(client, file_path, thumbnail_url, video_title, reply_msg, db_channel_id, user_mention, user_id, message):
     try:
-        collection_message = await client.send_video(
-            chat_id=collection_channel_id,
-            video=file_path,
-            caption=f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ: {user_mention}\n📥 ᴜsᴇʀ ʟɪɴᴋ: tg://user?id={user_id}",
-            thumb=thumbnail_path,
-            progress=progress
-        )
+        file_size = os.path.getsize(file_path)
+        uploaded = 0
+        start_time = datetime.now()
+        last_update_time = time.time()
 
-        await client.copy_message(
+
+        # **Download the Thumbnail (Fix)**
+        thumbnail_path = None
+        if thumbnail_url:
+            try:
+                thumbnail_path = await download_thumbnail(thumbnail_url)
+            except Exception as e:
+                logging.warning(f"Failed to download thumbnail: {e}")
+                thumbnail_path = None  # Avoid crash if thumbnail download fails
+
+        async def progress(current, total):
+            nonlocal uploaded, last_update_time
+            uploaded = current
+            percentage = (current / total) * 100
+            elapsed_time_seconds = (datetime.now() - start_time).total_seconds()
+
+            if time.time() - last_update_time > 2:
+                progress_text = format_progress_bar(
+                    filename=video_title,
+                    percentage=percentage,
+                    done=current,
+                    total_size=total,
+                    status="Uploading",
+                    eta=(total - current) / (current / elapsed_time_seconds) if current > 0 else 0,
+                    speed=current / elapsed_time_seconds if current > 0 else 0,
+                    elapsed=elapsed_time_seconds,
+                    user_mention=user_mention,
+                    user_id=user_id,
+                    aria2p_gid=""
+                )
+                try:
+                    await reply_msg.edit_text(progress_text)
+                    last_update_time = time.time()
+                except Exception as e:
+                    logging.warning(f"Error updating progress message: {e}")
+
+        # **Upload video to the database channel**
+        with open(file_path, 'rb') as file:
+            collection_message = await client.send_video(
+                chat_id=db_channel_id,
+                video=file,
+                caption=f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ : {user_mention}\n📥 <b>ʙʏ @Javpostr </b>",
+                thumb=thumbnail_path if thumbnail_path else None,  # Use local file
+                progress=progress
+            )
+
+        # **Copy the video from the DB channel to user (No forward header)**
+        copied_msg = await client.copy_message(
             chat_id=message.chat.id,
-            from_chat_id=collection_channel_id,
+            from_chat_id=db_channel_id,
             message_id=collection_message.id
         )
 
-        await asyncio.sleep(1)
-        await message.delete()
+        # Prepare customized caption & buttons
+        original_caption = f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ : {user_mention}\n📥 <b>ʙʏ @Javpostr </b>"
+        caption = "" if HIDE_CAPTION else original_caption
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(text=button_name, url=button_link)]]) if CHNL_BTN else None
 
+        # Edit caption of copied message
+        await copied_msg.edit_caption(
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+
+        # **Clean up files**
+        os.remove(file_path)
+        if thumbnail_path:
+            os.remove(thumbnail_path)  # Delete downloaded thumbnail
+
+        await message.delete()
         await reply_msg.delete()
+
+        # Send sticker (Optional)
         sticker_message = await message.reply_sticker("CAACAgIAAxkBAAEZdwRmJhCNfFRnXwR_lVKU1L9F3qzbtAAC4gUAAj-VzApzZV-v3phk4DQE")
         await asyncio.sleep(5)
         await sticker_message.delete()
 
-    except FloodWait as e:
-        logging.warning(f"FloodWait triggered: Sleeping for {e.value} seconds")
-        await asyncio.sleep(e.value)
-        return await upload_video(client, file_path, thumbnail_path, video_title, reply_msg, collection_channel_id, user_mention, user_id, message)  # Retry
+        return collection_message.id
 
     except Exception as e:
-        logging.error(f"Upload failed: {e}", exc_info=True)
-        await reply_msg.edit_text(f"❌ Upload failed: {e}")
-
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        if os.path.exists(thumbnail_path):
-            os.remove(thumbnail_path)
-
-    return collection_message.id
+        logging.error(f"Error during upload: {e}", exc_info=True)
+        return None
