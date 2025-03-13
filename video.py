@@ -214,7 +214,7 @@ async def upload_video(client, file_path, thumbnail_url, video_title, reply_msg,
 
         # Prepare customized caption & buttons
         original_caption = f"✨ {video_title}\n👤 ʟᴇᴇᴄʜᴇᴅ ʙʏ : {user_mention}\n📥 <b>ʙʏ @Javpostr </b>"
-        caption = "" if HIDE_CAPTION else original_caption
+        caption = "" original_caption
         reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(text=button_name, url=button_link)]]) if CHNL_BTN else None
 
         # Edit caption of copied message
